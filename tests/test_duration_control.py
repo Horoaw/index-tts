@@ -2,6 +2,7 @@ import pytest
 
 from indextts.utils.duration_control import (
     allocate_target_frames,
+    fit_final_segment_length,
     fit_waveform_length,
     normalize_target_duration,
 )
@@ -76,3 +77,28 @@ def test_fit_waveform_length_trims_and_pads():
     assert fit_waveform_length(wav, 3).samples == [0, 1, 2]
     assert fit_waveform_length(wav, 7).samples == [0, 1, 2, 3, 4, 0, 0]
     assert fit_waveform_length(wav, None) is wav
+
+
+def test_capacity_is_per_segment_and_accounts_for_pauses():
+    # Total speech can exceed one DiT budget if each segment fits individually.
+    assert allocate_target_frames(
+        22, [1, 1], 10, 10, 2000, max_segment_frames=10
+    ) == ([10, 10], 220)
+    with pytest.raises(ValueError, match=r"segment 1 needs 11.*only 10"):
+        allocate_target_frames(23, [1, 1], 10, 10, 2000, max_segment_frames=10)
+
+
+def test_reference_can_exhaust_the_entire_position_budget():
+    with pytest.raises(ValueError, match="DiT position capacity"):
+        allocate_target_frames(1, [1], 10, 10, max_segment_frames=0)
+
+
+def test_final_segment_fitting_accounts_for_previous_speech_and_gaps():
+    wav = FakeWaveform([1] * 5)
+    previous = [FakeWaveform([2] * 3), FakeWaveform([3] * 4)]
+    assert fit_final_segment_length(wav, previous, 16, 10, 200).samples == [1] * 5
+    assert fit_final_segment_length(wav, previous, 14, 10, 200).samples == [1] * 3
+    assert fit_final_segment_length(wav, previous, 18, 10, 200).samples == [1] * 5 + [0] * 2
+    assert fit_final_segment_length(wav, previous, None, 10, 200) is wav
+    with pytest.raises(ValueError, match="too short"):
+        fit_final_segment_length(wav, previous, 11, 10, 200)

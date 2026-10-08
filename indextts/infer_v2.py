@@ -22,7 +22,9 @@ from indextts.utils.checkpoint import load_checkpoint
 from indextts.utils.common import save_pcm_wav
 from indextts.utils.duration_control import (
     allocate_target_frames,
+    fit_final_segment_length,
     fit_waveform_length,
+    get_max_target_frames,
     normalize_target_duration,
 )
 from indextts.utils.front import TextNormalizer, TextTokenizer
@@ -379,6 +381,18 @@ class IndexTTS2:
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
               verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0,
               duration_factor=1.0, target_duration=None, **generation_kwargs):
+        """Synthesize audio or return an audio-chunk iterator.
+
+        ``target_duration`` is the total output duration in seconds, including
+        ``interval_silence`` milliseconds between text segments. A positive,
+        finite value overrides the dimensionless ``duration_factor`` multiplier;
+        ``None`` or an empty string uses automatic duration with that multiplier.
+        Targeted output is trimmed or padded to the nearest sample at 22050 Hz.
+        Invalid values, durations too short for the segments and pauses, or
+        allocations exceeding the DiT position budget after reserving reference
+        and conditioning positions raise ``ValueError`` before speech generation.
+        For streaming, capacity validation runs when the iterator is consumed.
+        """
         if stream_return:
             return self.infer_generator(
                 spk_audio_prompt, text, output_path,
@@ -407,6 +421,18 @@ class IndexTTS2:
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
               verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0,
               duration_factor=1.0, target_duration=None, **generation_kwargs):
+        """Generate audio, yielding chunks when streaming is enabled.
+
+        ``target_duration`` is the total output duration in seconds, including
+        ``interval_silence`` milliseconds between text segments. A positive,
+        finite value overrides the dimensionless ``duration_factor`` multiplier;
+        ``None`` or an empty string uses automatic duration with that multiplier.
+        Targeted output is trimmed or padded to the nearest sample at 22050 Hz.
+        Invalid values, durations too short for the segments and pauses, or
+        allocations exceeding the DiT position budget after reserving reference
+        and conditioning positions raise ``ValueError`` before speech generation.
+        For streaming, capacity validation runs when the iterator is consumed.
+        """
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         target_duration = normalize_target_duration(target_duration)
@@ -561,6 +587,10 @@ class IndexTTS2:
             sampling_rate,
             hop_length,
             interval_silence,
+            max_segment_frames=(
+                get_max_target_frames(self.s2mel.models['cfm'], prompt_condition.size(1))
+                if target_duration is not None else None
+            ),
         )
         if target_segment_frames is not None:
             print(
@@ -709,19 +739,10 @@ class IndexTTS2:
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
 
-                    if target_samples is not None and seg_idx == segments_count - 1:
-                        silence_samples = max(
-                            0, int(sampling_rate * interval_silence / 1000.0)
-                        ) * (segments_count - 1)
-                        previous_samples = sum(part.shape[-1] for part in wavs)
-                        final_segment_samples = (
-                            target_samples - silence_samples - previous_samples
+                    if seg_idx == segments_count - 1:
+                        wav = fit_final_segment_length(
+                            wav, wavs, target_samples, sampling_rate, interval_silence
                         )
-                        if final_segment_samples <= 0:
-                            raise ValueError(
-                                "target_duration is too short for the synthesized segments"
-                            )
-                        wav = fit_waveform_length(wav, final_segment_samples)
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
