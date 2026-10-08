@@ -140,6 +140,7 @@ def test_public_output_has_exact_duration_and_pauses(engine, stream):
         rate, data = result
         assert rate == SAMPLE_RATE
         assert data.shape == (round(duration * SAMPLE_RATE), 1)
+        assert data[-1, 0] == 0  # Upstream fade follows final sample fitting.
     assert engine.target_lengths == [4, 6]
     assert engine.gpt.inference_speech.call_count == 2
 
@@ -209,6 +210,8 @@ def test_low_vram_prepares_and_reuses_uncached_reference(engine, monkeypatch):
     assert rate == SAMPLE_RATE
     assert data.shape == (round(0.123 * SAMPLE_RATE), 1)
     engine.mel_fn.assert_called_once()
+    engine.get_emb.assert_called_once()
+    engine._load_and_cut_audio.assert_called_once()
     engine.campplus_model.assert_called_once()
     assert engine.target_lengths == [10, 3, 7]  # reference prepared once, then speech
 
@@ -261,3 +264,8 @@ def test_public_rejects_duration_shorter_than_pauses(engine, stream):
         if stream:
             next(result)
     engine.gpt.inference_speech.assert_not_called()
+
+
+def test_public_preserves_explicit_sampling_choice(engine):
+    call(engine, target_duration=0.123, interval_silence=10, do_sample=False)
+    assert all(not args.kwargs["do_sample"] for args in engine.gpt.inference_speech.call_args_list)

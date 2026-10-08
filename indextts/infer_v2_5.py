@@ -20,7 +20,7 @@ from omegaconf import OmegaConf
 from indextts.codec.models import EnhancedCodec
 from indextts.gpt.model_v2 import UnifiedVoice
 from indextts.utils.checkpoint import load_checkpoint
-from indextts.utils.common import save_pcm_wav
+from indextts.utils.common import fade_out_tail, save_pcm_wav
 from indextts.utils.duration_control import (
     allocate_target_frames,
     fit_final_segment_length,
@@ -529,13 +529,9 @@ class IndexTTS2:
             input_features = input_features.to(self.device)
             attention_mask = attention_mask.to(self.device)
             spk_cond_emb = self.get_emb(input_features, attention_mask)
-
-            # _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
-            S_ref = self.get_emb(input_features, attention_mask)
             ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
             ref_target_lengths = torch.LongTensor([ref_mel.size(2)]).to(ref_mel.device)
 
-            audio_16k = torchaudio.transforms.Resample(sr, 16000)(self._load_and_cut_audio(spk_audio_prompt, 15, verbose)[0])
             feat = torchaudio.compliance.kaldi.fbank(audio_16k.to(ref_mel.device),
                                                     num_mel_bins=80,
                                                     dither=0,
@@ -876,7 +872,7 @@ class IndexTTS2:
                         emo_vec=emovec,
                         campplus_embedding=style,
                         wav=spk_audio_prompt,
-                        do_sample=True,
+                        do_sample=do_sample,
                         top_p=top_p,
                         top_k=top_k,
                         temperature=temperature,
@@ -979,6 +975,9 @@ class IndexTTS2:
         wavs = self.insert_interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
         wav = torch.cat(wavs, dim=1)
         wav = fit_waveform_length(wav, target_samples)
+        # 停止符采样偏早时，末尾可能停在话音中间
+        # (index-tts/index-tts#247, #488, #523, #633)，详见 fade_out_tail()。
+        wav = fade_out_tail(wav, sampling_rate)
         wav_length = wav.shape[-1] / sampling_rate
         print(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
         print(f">> s2mel_time: {s2mel_time:.2f} seconds")
